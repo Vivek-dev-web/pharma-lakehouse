@@ -25,9 +25,16 @@ credentials being cloud-bound, Lakeflow rejecting explicit table paths under
 UC governance, ADF needing a SQL login in addition to storage RBAC) — all
 discovered by running this for real, not from documentation.
 
-**New here?** [docs/DESIGN.md](docs/DESIGN.md) has the why (problem
-statement, decisions and tradeoffs, cost model). [docs/DATABRICKS_GETTING_STARTED.md](docs/DATABRICKS_GETTING_STARTED.md)
-is a from-zero walkthrough for deploying and running the Databricks side if
+**New here?**
+[docs/DESIGN.md](docs/DESIGN.md) has the why (problem statement, decisions
+and tradeoffs, cost model).
+[docs/DATA_FLOW.md](docs/DATA_FLOW.md) has step-by-step diagrams of how data
+actually moves through ADF and through the Databricks bronze/silver/gold
+pipeline, with real row counts.
+[docs/RUNBOOK.md](docs/RUNBOOK.md) is day-2 operations — trigger, verify,
+troubleshoot, check cost.
+[docs/DATABRICKS_GETTING_STARTED.md](docs/DATABRICKS_GETTING_STARTED.md) is
+a from-zero walkthrough for deploying and running the Databricks side if
 you haven't used Databricks before.
 
 ## What's actually live right now
