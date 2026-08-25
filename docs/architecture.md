@@ -80,7 +80,9 @@ plus `CREATE TABLE ... LOCATION`, producing real named-path external Delta
 tables in a dedicated `pharma_lakehouse_gold` schema. Verified: `fact_shipment`'s
 `storage_location` is exactly `abfss://pharma-gold@stc360legacyws.dfs.core.windows.net/fact_shipment`,
 and it's queryable with real row counts (4,000 shipments) both from
-Databricks SQL and, once `sql/synapse_serving_views.sql` is run, from Synapse.
+Databricks SQL and from Synapse (`sql/synapse_serving_views.sql`, applied
+and verified -- see the discoveries section below for what it actually took
+to get there).
 
 One tradeoff worth naming: the exported copies in `pharma_lakehouse_gold`
 are physically separate Delta tables from the governed originals in
@@ -134,13 +136,71 @@ environment requires it.
 
 ## Why the RBAC role assignments are a separate file
 
-`infra/rbac.bicep` holds both storage role assignments (ADF's identity and
-the access connector's identity, both granted "Storage Blob Data
-Contributor" on `stc360legacyws`) instead of living in `main.bicep`.
-Granting IAM/access-control permissions is categorically different from
-provisioning a resource -- it changes who can read/write existing data, not
-just what exists -- so it's kept reviewable and deployable on its own rather
-than bundled into a template that otherwise touches nothing sensitive.
+`infra/rbac.bicep` holds all storage role assignments -- ADF's identity, the
+access connector's identity, **and Synapse workspace's own identity**, all
+granted "Storage Blob Data Contributor" on `stc360legacyws` -- instead of
+living in `main.bicep`. Granting IAM/access-control permissions is
+categorically different from provisioning a resource -- it changes who can
+read/write existing data, not just what exists -- so it's kept reviewable
+and deployable on its own rather than bundled into a template that otherwise
+touches nothing sensitive. The Synapse grant wasn't in the original plan --
+it only became obvious as a gap when `CREATE DATABASE SCOPED CREDENTIAL ...
+WITH IDENTITY = 'Managed Identity'` in `sql/synapse_serving_views.sql`
+turned out to authenticate as the *workspace's* identity, not the querying
+user's -- see the next section.
+
+## Discoveries from testing this for real
+
+Every item here was found by actually running the pipeline against live
+infrastructure and reading the exact error, not from documentation. Listed
+in the order they were hit, because each one only became visible after
+fixing the last:
+
+1. **`LocalFilesystemAccessDeniedException` on `dbutils.fs.cp`.** Serverless
+   compute blocks `dbutils` access to the driver's local filesystem --
+   staging synthetic data to `/tmp` then copying to a UC Volume (a pattern
+   that works fine on classic clusters) fails outright. Fix: write straight
+   to `/Volumes/...` with plain Python `open()` (`transforms/00_generate_sample_data.py`).
+2. **Lakeflow rejects an explicit `path=` on a UC-governed `dlt.table`.**
+   Covered above -- led to the separate `export_gold_to_adls.py` step.
+3. **Storage RBAC alone doesn't let ADF query Synapse.** `Login failed for
+   user '<token-identified principal>'` -- managed-identity storage access
+   and a SQL *login* inside the target database are two separate grants.
+   Fix: `CREATE USER [adf-c360-legacy] FROM EXTERNAL PROVIDER;`.
+4. **A SQL login with `db_datareader` still isn't enough for ADF's Copy
+   Activity.** `You do not have permission to use the bulk load statement.`
+   -- ADF's SQL source connector uses bulk-load semantics under the hood
+   regardless of query shape. Fix: `GRANT ADMINISTER DATABASE BULK
+   OPERATIONS`.
+5. **Querying a view doesn't inherit permission on the credential its
+   `OPENROWSET` depends on.** `Cannot find the CREDENTIAL 'cred_adls' ...
+   or you do not have permission` -- ownership chaining didn't extend to
+   the database-scoped credential object itself. Fix: `GRANT REFERENCES ON
+   DATABASE SCOPED CREDENTIAL::cred_adls`.
+6. **`CREATE DATABASE SCOPED CREDENTIAL` requires a database master key
+   first**, even for a Managed-Identity credential with no secret of its
+   own to encrypt -- `Please create a master key in the database...`. Fix:
+   `CREATE MASTER KEY ENCRYPTION BY PASSWORD = '...'` before the credential
+   (a real, randomly generated password used once at execution time --
+   never committed; the checked-in script has a placeholder).
+7. **Deletion vectors break Synapse's Delta reader entirely.** Databricks
+   Runtime enables `delta.enableDeletionVectors` by default on new tables
+   (protocol reader v3 / writer v7). Synapse serverless SQL's `FORMAT =
+   'DELTA'` reader only understands the older protocol, and fails with
+   `Content of directory on path '.../_delta_log/*.*' cannot be listed`
+   (13807) -- which reads exactly like a permissions error and isn't one,
+   confirmed by successfully reading the same files as plain Parquet with
+   identical credentials. Fix: `.option("delta.enableDeletionVectors",
+   "false")` at write time in `export_gold_to_adls.py`, plus wiping the
+   target path first so a previous run's protocol can't linger.
+8. **ADF's Copy Activity writes an extensionless filename when the sink
+   dataset only specifies a folder path.** `dbo.batch_master`'s `OPENROWSET
+   BULK 'drug_batches_from_erp/*.csv'` silently matched zero files (no
+   error -- just 0 rows) even though ADF's own run diagnostics showed
+   `rowsCopied: 500`. Fix: wildcard on `*`, not `*.csv`.
+
+None of these are exotic -- every one is the kind of gap that only shows up
+once you stop at "the deploy succeeded" and actually run the thing.
 
 ## Cost: real numbers, not just estimates
 

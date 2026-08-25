@@ -15,8 +15,9 @@ actually been deployed and run, not just designed.
   pre-existing in `rg-customer360-legacy`) demonstrate real database + public
   API integration, using managed-identity auth only — no passwords or
   storage keys anywhere in this repo.
-- **Power BI** DirectQueries Databricks SQL; **Synapse serverless SQL** can
-  also read the same gold Delta tables directly via a dedicated export step.
+- **Power BI** DirectQueries Databricks SQL; **Synapse serverless SQL** also
+  reads the same gold Delta tables directly via a dedicated export step —
+  both serving paths verified working.
 
 See [docs/architecture.md](docs/architecture.md) for the full diagram and
 the platform constraints this build actually ran into (Unity Catalog storage
@@ -31,33 +32,30 @@ you haven't used Databricks before.
 
 ## What's actually live right now
 
+Everything. Every component below has been deployed, run, and verified with
+real data — not just designed:
+
 | Component | Status | Evidence |
 |---|---|---|
 | Azure Databricks workspace (`pharmalake-dbx`) | **Provisioned & running** | `infra/main.bicep` deployed; Unity Catalog auto-enabled |
-| Databricks bundle, `azure` target | **Deployed & run, twice** | Full job succeeded: generate → Lakeflow pipeline → DQ → governance → gold export, ~5 min end-to-end |
+| Databricks bundle, `azure` target | **Deployed & run repeatedly** | Full job succeeds: generate → Lakeflow pipeline → DQ → governance → gold export, ~5 min end-to-end |
 | Gold tables (UC-managed) | **Populated with real data** | 4,000 shipments, 1,200 adverse events, 500 batches — verified via SQL warehouse |
-| Gold export (`pharma_lakehouse_gold` schema) | **11/11 tables exported** | Confirmed `storage_location = abfss://pharma-gold@stc360legacyws.dfs.core.windows.net/<table>`, real row counts queried |
-| Storage RBAC (`infra/rbac.bicep`) | **Applied** | ADF's and the access connector's managed identities both granted Storage Blob Data Contributor |
+| Gold export (`pharma_lakehouse_gold` schema) | **11/11 tables exported, readable from Synapse** | Real `SELECT`/`JOIN` across `gold_safety_signal_summary` + `dim_product` via Synapse serverless SQL, 440 rows |
+| Storage RBAC (`infra/rbac.bicep`) | **Applied** | ADF's, the access connector's, **and Synapse workspace's** managed identities all granted Storage Blob Data Contributor |
 | UC storage credential + external location | **Created** | `stc360legacyws_cred` / `pharma_gold`, backed by `pharmalake-uc-access-connector` |
 | Budget alert | **Active** | $25/month on `rg-customer360-legacy`, alerts to `vivekt94@gmail.com` at 50/80/100% |
-| ADF pipeline (`pl_pharma_orchestrate`) | **Deployed, partially verified** | `copy_clinical_registry_to_adls` succeeds; `copy_batch_master_sql_to_adls` blocked on one remaining step (below) |
+| ADF pipeline (`pl_pharma_orchestrate`) | **Fully succeeds** | Both activities succeed: 500 rows copied from Synapse serverless SQL, 4 records from the ClinicalTrials.gov API |
+| Synapse serving layer (`sql/synapse_serving_views.sql`) | **Applied, all views resolve** | Raw extracts (`batch_master`, `clinical_registry_raw`) and all 11 gold Delta views queryable with real row counts |
 | Databricks bundle, `dev` target (AWS Free Edition) | **Still live from the first pass** | Kept as the $0 reference implementation |
 
-## What needs your action (1 step left)
-
-Everything IAM/RBAC-related is done. The one remaining step needs interactive
-Azure AD auth, which can't be scripted headlessly:
-
-Run [sql/synapse_serving_views.sql](sql/synapse_serving_views.sql) in
-[Synapse Studio](https://synapse-c360-legacy.dev.azuresynapse.net) against
-the `synapse-c360-legacy-ondemand` serverless endpoint. It creates ADF's SQL
-login (storage RBAC alone wasn't enough — discovered by testing), the
-`dbo.batch_master_source` view, and the views over both the raw extracts and
-the exported gold Delta tables.
-
-After that, `az datafactory pipeline create-run -g rg-customer360-legacy
---factory-name adf-c360-legacy --name pl_pharma_orchestrate` should succeed
-end-to-end.
+Six real issues were found and fixed by actually running this end to end
+rather than stopping at "looks right" — see
+[docs/architecture.md § Discoveries from testing this for real](docs/architecture.md#discoveries-from-testing-this-for-real)
+for all of them (a missing SQL login, a missing bulk-operations grant, a
+missing credential-reference grant, a database master key prerequisite, a
+Delta protocol feature Synapse can't read, and an ADF output-filename
+wildcard mismatch). None of these show up until you actually run the
+pipeline against live infrastructure.
 
 ## Domain
 
@@ -117,7 +115,7 @@ python data_gen/generate_pharma_data.py --out-dir ./sample_data --seed 42
 | JD responsibility | Where it lives |
 |---|---|
 | Data pipeline development | [transforms/](transforms/) (Lakeflow bronze/silver/gold) — **live on real Azure Databricks** |
-| Data integration (APIs, DBs, external datasets) | [adf/](adf/) — Synapse serverless SQL + ClinicalTrials.gov public API — **deployed, partially verified** |
+| Data integration (APIs, DBs, external datasets) | [adf/](adf/) — Synapse serverless SQL + ClinicalTrials.gov public API — **both activities succeed live** |
 | Data modeling | [transforms/gold.py](transforms/gold.py) star schema; [docs/data_dictionary.md](docs/data_dictionary.md) |
 | Database management | Reused existing Synapse/storage (see architecture doc for why no new Azure SQL DB) |
 | Data quality | [dq/data_quality_checks.py](dq/data_quality_checks.py) — **25/25 checks passing live** |

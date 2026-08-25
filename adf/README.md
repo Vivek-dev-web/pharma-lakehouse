@@ -51,20 +51,31 @@ the external-API source, called directly, no seeding needed.
 - **ADF -> ADLS Gen2**: the ADLS linked service has no key/SAS configured, so
   ADF falls back to its system-assigned managed identity. That identity
   needs the **Storage Blob Data Contributor** role on `stc360legacyws` --
-  granted by `infra/rbac.bicep`. **Applied** -- `copy_clinical_registry_to_adls`
-  now writes successfully.
+  granted by `infra/rbac.bicep`. **Applied and verified** --
+  `copy_clinical_registry_to_adls` writes successfully.
 - **ADF -> Synapse serverless SQL**: `AzureSqlDatabaseLinkedService` with
   `authentication_type="SystemAssignedManagedIdentity"` -- no SQL login or
   password anywhere. (Note: this must be a dedicated typed field, not
   embedded in the connection string as `Authentication=...` -- ADF's copy
   engine uses an older SQL client that rejects that keyword outright.)
-  Storage RBAC alone isn't sufficient here, though -- discovered by testing
-  the real pipeline, ADF's identity also needs an actual **SQL login** in
-  the Synapse database, or the connection authenticates fine and then fails
-  with `Login failed for user '<token-identified principal>'`. That's the
-  `CREATE USER [adf-c360-legacy] FROM EXTERNAL PROVIDER` statement now in
-  `sql/synapse_serving_views.sql` -- run that script (Synapse Studio,
-  interactive Azure AD auth) before testing `copy_batch_master_sql_to_adls`.
+  Storage RBAC alone wasn't sufficient here, though -- getting
+  `copy_batch_master_sql_to_adls` to actually succeed took **three more
+  grants**, each discovered by running it and reading the next error:
+  1. `CREATE USER [adf-c360-legacy] FROM EXTERNAL PROVIDER` -- storage RBAC
+     doesn't grant a SQL login; without it, `Login failed for user
+     '<token-identified principal>'`.
+  2. `GRANT ADMINISTER DATABASE BULK OPERATIONS` -- ADF's Copy Activity uses
+     bulk-load semantics under the hood regardless of query shape;
+     `db_datareader` alone gets `You do not have permission to use the bulk
+     load statement.`
+  3. `GRANT REFERENCES ON DATABASE SCOPED CREDENTIAL::cred_adls` -- querying
+     `dbo.batch_master_source` (an `OPENROWSET` view) doesn't inherit
+     permission on the credential the view's data source depends on;
+     without it, `Cannot find the CREDENTIAL 'cred_adls' ... or you do not
+     have permission`.
+
+  All three are in `sql/synapse_serving_views.sql`, applied and verified --
+  `copy_batch_master_sql_to_adls` now copies all 500 rows successfully.
 
 ## Deploy
 
@@ -85,16 +96,25 @@ activities), and the daily trigger (stopped).
 az datafactory pipeline create-run -g rg-customer360-legacy --factory-name adf-c360-legacy --name pl_pharma_orchestrate
 ```
 
-Both activities were tested for real against the live factory, twice, as the
-prerequisites got resolved:
-- `copy_clinical_registry_to_adls`: **succeeds** now that storage RBAC is
-  applied.
-- `copy_batch_master_sql_to_adls`: was `SqlFailedToConnect` (Synapse
-  serverless cold-starting -- "SQL pool is warming up, please try again",
-  clears on retry), then `Login failed for user '<token-identified principal>'`
-  once connectivity worked -- storage RBAC doesn't grant a SQL login. Run
-  `sql/synapse_serving_views.sql` (creates the login + `dbo.batch_master_source`)
-  and this activity should complete too.
+Both activities were tested for real against the live factory, repeatedly,
+as each prerequisite got resolved -- **both succeed now**:
+- `copy_clinical_registry_to_adls`: writes the ClinicalTrials.gov API
+  response to `pharma-raw/clinical_registry/`.
+- `copy_batch_master_sql_to_adls`: copies all 500 rows from
+  `dbo.batch_master_source` (Synapse serverless SQL) to
+  `pharma-raw/drug_batches_from_erp/`. Along the way this one also hit
+  `SqlFailedToConnect` (Synapse serverless cold-starting -- "SQL pool is
+  warming up, please try again", clears on retry) before the three SQL
+  grants above were even in play.
+
+`sql/synapse_serving_views.sql`'s own `dbo.batch_master` view (over ADF's
+*output*, independent of the pipeline that produced it) needed one more fix
+after that: its `OPENROWSET BULK` wildcard was `drug_batches_from_erp/*.csv`,
+but ADF's Copy Activity writes an auto-generated filename with **no
+extension** when the sink dataset only specifies a folder path -- the
+wildcard silently matched zero files (0 rows, no error) even though ADF's
+own run diagnostics showed `rowsCopied: 500`. Fixed to `*` (no extension
+filter).
 
 ## SDK quirk worth knowing about
 

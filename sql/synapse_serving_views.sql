@@ -19,6 +19,10 @@
 -- Run against the existing Synapse workspace's serverless SQL endpoint:
 --   synapse-c360-legacy-ondemand.sql.azuresynapse.net
 -- (workspace: synapse-c360-legacy, resource group: rg-customer360-legacy)
+--
+-- Verified end to end: every statement below has been applied against the
+-- live endpoint, all 14 views resolve, and both ADF copy activities that
+-- depend on this script (adf/deploy_adf_pipeline.py) succeed.
 
 CREATE DATABASE pharma_lakehouse_raw;
 GO
@@ -35,8 +39,34 @@ GO
 ALTER ROLE db_datareader ADD MEMBER [adf-c360-legacy];
 GO
 
+-- db_datareader alone isn't enough either -- ADF's Copy Activity reads a
+-- SQL source using bulk-load semantics under the hood. Without this grant,
+-- the pipeline gets past authentication and authorization for SELECT, then
+-- fails at the very last step with "You do not have permission to use the
+-- bulk load statement." (again, only found by actually running it).
+GRANT ADMINISTER DATABASE BULK OPERATIONS TO [adf-c360-legacy];
+GO
+
+-- Required before any CREATE DATABASE SCOPED CREDENTIAL, even a
+-- Managed-Identity one with no embedded secret of its own -- discovered by
+-- testing: "Please create a master key in the database..." (15581). Pick
+-- your own strong password; nothing sensitive is actually encrypted by it
+-- here (managed-identity credentials store no secret), but don't reuse a
+-- real password and don't commit whatever you choose to a public repo.
+CREATE MASTER KEY ENCRYPTION BY PASSWORD = '<REPLACE_WITH_A_STRONG_PASSWORD>';
+GO
+
 CREATE DATABASE SCOPED CREDENTIAL cred_adls
 WITH IDENTITY = 'Managed Identity';
+GO
+
+-- Querying a view built on OPENROWSET doesn't automatically chain
+-- permission to the credential the underlying external data source uses --
+-- ADF got all the way to "Login failed" -> SQL login -> bulk-operations
+-- grant -> and only then hit "Cannot find the CREDENTIAL 'cred_adls' ...
+-- or you do not have permission" reading dbo.batch_master_source. Every
+-- principal that queries a view referencing this credential needs this.
+GRANT REFERENCES ON DATABASE SCOPED CREDENTIAL::cred_adls TO [adf-c360-legacy];
 GO
 
 CREATE EXTERNAL DATA SOURCE ds_pharma_raw
@@ -88,11 +118,16 @@ GO
 
 -- What ADF actually lands (copy_batch_master_sql_to_adls activity output) --
 -- a conformed extract at drug_batches_from_erp/, queryable independently of
--- the pipeline that produced it.
+-- the pipeline that produced it. Wildcard is `*`, not `*.csv` -- ADF's Copy
+-- Activity writes an auto-generated filename with no extension when the
+-- sink dataset only specifies a folder path, so `*.csv` silently matches
+-- nothing (returns an empty result, not an error) -- found by comparing
+-- rowsCopied=500 in the ADF activity's own run diagnostics against a 0-row
+-- result here.
 CREATE OR ALTER VIEW dbo.batch_master AS
 SELECT *
 FROM OPENROWSET(
-    BULK 'drug_batches_from_erp/*.csv',
+    BULK 'drug_batches_from_erp/*',
     DATA_SOURCE = 'ds_pharma_raw',
     FORMAT = 'CSV',
     PARSER_VERSION = '2.0',

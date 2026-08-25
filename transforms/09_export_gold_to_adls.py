@@ -10,6 +10,18 @@
 # case on the `dev` (AWS Free Edition) target -- Unity Catalog storage
 # credentials are cloud-bound, so this step is meaningless there; gold just
 # stays UC-managed on `dev` and is served via Databricks SQL DirectQuery only.
+#
+# Deletion vectors are explicitly disabled at write time. Databricks Runtime
+# enables `delta.enableDeletionVectors` by default on new tables (protocol
+# reader v3 / writer v7), and Synapse serverless SQL's Delta reader only
+# understands the older protocol -- with deletion vectors on, every
+# OPENROWSET ... FORMAT = 'DELTA' query against the exported table fails
+# with "Content of directory on path '.../_delta_log/*.*' cannot be listed"
+# (13807), which reads like a permissions error but isn't one -- confirmed
+# by successfully reading the same files as plain Parquet with identical
+# credentials. The target path is also wiped before each write so a stale
+# transaction log from a previous run (with the feature already enabled)
+# can't linger and re-trigger this.
 dbutils.widgets.text("catalog", "workspace")
 dbutils.widgets.text("schema", "pharma_lakehouse")
 dbutils.widgets.text("gold_export_root", "")
@@ -37,8 +49,16 @@ else:
         target_path = f"{gold_export_root}/{table}"
         target_table = f"{catalog}.{gold_schema}.{table}"
 
+        dbutils.fs.rm(target_path, recurse=True)  # clear any stale log/protocol from a previous run
+
         df = spark.table(source_table)
-        df.write.format("delta").mode("overwrite").option("overwriteSchema", "true").save(target_path)
+        (
+            df.write.format("delta")
+            .mode("overwrite")
+            .option("overwriteSchema", "true")
+            .option("delta.enableDeletionVectors", "false")
+            .save(target_path)
+        )
 
         spark.sql(f"DROP TABLE IF EXISTS {target_table}")
         spark.sql(f"CREATE TABLE {target_table} USING DELTA LOCATION '{target_path}'")
