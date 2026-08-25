@@ -1,0 +1,130 @@
+# Azure DevOps CI/CD pipeline for pharma-lakehouse.
+#
+# Stages:
+#   1. test    -- pytest on pure-Python business logic (no Spark/cloud needed)
+#   2. validate -- `databricks bundle validate` + `az bicep build` (fast, no deploy)
+#   3. deploy_infra -- `az deployment group create` for infra/main.bicep against
+#                      the EXISTING rg-customer360-legacy resource group (adds
+#                      one blob container + one RBAC role assignment -- no new
+#                      Data Factory/Databricks/SQL resources are provisioned).
+#                      Manual approval gate: this is the one stage that touches
+#                      IAM, so it never runs unattended.
+#   4. deploy_lakehouse -- `databricks bundle deploy` + `bundle run` the job
+#                      against the `medallion` Free Edition workspace
+#   5. deploy_adf -- `python adf/deploy_adf_pipeline.py` against the existing
+#                      `adf-c360-legacy` factory
+#
+# Set these as pipeline variables / variable group `pharma-lakehouse-dev`:
+#   AZURE_SERVICE_CONNECTION, DATABRICKS_HOST, DATABRICKS_TOKEN (secret),
+#   RESOURCE_GROUP (default: rg-customer360-legacy)
+
+trigger:
+  branches:
+    include: [main]
+  paths:
+    include: [transforms/*, dq/*, governance/*, infra/*, tests/*, databricks.yml]
+
+pr:
+  branches:
+    include: [main]
+
+pool:
+  vmImage: ubuntu-latest
+
+variables:
+  - group: pharma-lakehouse-dev
+
+stages:
+  - stage: test
+    displayName: "Unit tests"
+    jobs:
+      - job: pytest
+        steps:
+          - task: UsePythonVersion@0
+            inputs: { versionSpec: "3.11" }
+          - script: |
+              pip install -r requirements.txt
+              pytest tests/ -v --junitxml=test-results.xml
+            displayName: "Run pytest"
+          - task: PublishTestResults@2
+            condition: succeededOrFailed()
+            inputs:
+              testResultsFiles: "test-results.xml"
+
+  - stage: validate
+    displayName: "Validate bundle + infra"
+    dependsOn: test
+    jobs:
+      - job: validate_bundle
+        steps:
+          - script: |
+              curl -fsSL https://raw.githubusercontent.com/databricks/setup-cli/main/install.sh | sh
+              databricks bundle validate --target dev
+            displayName: "databricks bundle validate"
+            env:
+              DATABRICKS_HOST: $(DATABRICKS_HOST)
+              DATABRICKS_TOKEN: $(DATABRICKS_TOKEN)
+          - task: AzureCLI@2
+            displayName: "az bicep build (lint)"
+            inputs:
+              azureSubscription: $(AZURE_SERVICE_CONNECTION)
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: az bicep build --file infra/main.bicep
+
+  - stage: deploy_infra
+    displayName: "Deploy Azure infra (container + RBAC)"
+    dependsOn: validate
+    condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+    jobs:
+      - deployment: deploy_bicep
+        environment: pharma-lakehouse-infra-prod-approval # configure a required-approval check on this environment (this stage grants IAM)
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - task: AzureCLI@2
+                  displayName: "az deployment group create"
+                  inputs:
+                    azureSubscription: $(AZURE_SERVICE_CONNECTION)
+                    scriptType: bash
+                    scriptLocation: inlineScript
+                    inlineScript: |
+                      az deployment group create \
+                        --resource-group $(RESOURCE_GROUP) \
+                        --template-file infra/main.bicep
+
+  - stage: deploy_lakehouse
+    displayName: "Deploy + run Databricks job"
+    dependsOn: validate
+    condition: succeeded()
+    jobs:
+      - job: bundle_deploy
+        steps:
+          - script: |
+              curl -fsSL https://raw.githubusercontent.com/databricks/setup-cli/main/install.sh | sh
+              databricks bundle deploy --target dev
+              databricks bundle run pharma_lakehouse_job --target dev
+            displayName: "databricks bundle deploy + run"
+            env:
+              DATABRICKS_HOST: $(DATABRICKS_HOST)
+              DATABRICKS_TOKEN: $(DATABRICKS_TOKEN)
+
+  - stage: deploy_adf
+    displayName: "Deploy ADF pipeline"
+    dependsOn: deploy_infra
+    condition: succeeded()
+    jobs:
+      - job: adf_deploy
+        steps:
+          - task: UsePythonVersion@0
+            inputs: { versionSpec: "3.11" }
+          - task: AzureCLI@2
+            displayName: "python adf/deploy_adf_pipeline.py"
+            inputs:
+              azureSubscription: $(AZURE_SERVICE_CONNECTION)
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                pip install -r requirements.txt
+                python adf/deploy_adf_pipeline.py --resource-group $(RESOURCE_GROUP)

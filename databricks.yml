@@ -1,0 +1,127 @@
+bundle:
+  name: pharma-lakehouse
+
+variables:
+  catalog:
+    description: Unity Catalog catalog to write tables into
+    default: workspace
+  schema:
+    description: Unity Catalog schema to write tables into
+    default: pharma_lakehouse
+  gold_export_root:
+    description: >-
+      ADLS Gen2 path to export gold tables to as named-path external Delta
+      tables (empty = skip export). Only meaningful on the `azure` target --
+      Unity Catalog storage credentials are cloud-bound, so this can't work
+      against an AWS-hosted workspace.
+    default: ""
+  gold_schema:
+    description: Schema to register the exported external gold tables under.
+    default: pharma_lakehouse_gold
+
+resources:
+  pipelines:
+    pharma_pipeline:
+      name: pharma_lakehouse_pipeline_${bundle.target}
+      catalog: ${var.catalog}
+      target: ${var.schema}
+      serverless: true
+      photon: true
+      configuration:
+        raw_root: /Volumes/${var.catalog}/${var.schema}/raw_landing
+      libraries:
+        - notebook:
+            path: transforms/bronze.py
+        - notebook:
+            path: transforms/silver.py
+        - notebook:
+            path: transforms/gold.py
+
+  jobs:
+    pharma_lakehouse_job:
+      name: pharma_lakehouse_job_${bundle.target}
+      description: >-
+        Generates synthetic pharma supply-chain/safety data, runs the
+        Lakeflow bronze/silver/gold pipeline, runs data-quality checks,
+        applies Unity Catalog governance (masks/row filters/tags), and
+        (on the `azure` target only) exports gold to named-path external
+        Delta tables under ADLS Gen2 for Synapse serverless SQL to read.
+      parameters:
+        - name: catalog
+          default: ${var.catalog}
+        - name: schema
+          default: ${var.schema}
+        - name: gold_export_root
+          default: ${var.gold_export_root}
+        - name: gold_schema
+          default: ${var.gold_schema}
+      tasks:
+        - task_key: generate_sample_data
+          notebook_task:
+            notebook_path: transforms/00_generate_sample_data.py
+            base_parameters:
+              catalog: "{{job.parameters.catalog}}"
+              schema: "{{job.parameters.schema}}"
+
+        - task_key: run_pipeline
+          depends_on:
+            - task_key: generate_sample_data
+          pipeline_task:
+            pipeline_id: ${resources.pipelines.pharma_pipeline.id}
+
+        - task_key: run_data_quality_checks
+          depends_on:
+            - task_key: run_pipeline
+          notebook_task:
+            notebook_path: dq/data_quality_checks.py
+            base_parameters:
+              catalog: "{{job.parameters.catalog}}"
+              schema: "{{job.parameters.schema}}"
+
+        - task_key: apply_governance
+          depends_on:
+            - task_key: run_data_quality_checks
+          notebook_task:
+            notebook_path: governance/apply_governance.py
+            base_parameters:
+              catalog: "{{job.parameters.catalog}}"
+              schema: "{{job.parameters.schema}}"
+
+        - task_key: export_gold_to_adls
+          depends_on:
+            - task_key: apply_governance
+          notebook_task:
+            notebook_path: transforms/09_export_gold_to_adls.py
+            base_parameters:
+              catalog: "{{job.parameters.catalog}}"
+              schema: "{{job.parameters.schema}}"
+              gold_export_root: "{{job.parameters.gold_export_root}}"
+              gold_schema: "{{job.parameters.gold_schema}}"
+
+targets:
+  dev:
+    mode: development
+    default: true
+    workspace:
+      # `medallion` Databricks CLI profile (~/.databrickscfg) -- AWS Free
+      # Edition workspace, kept as the $0 reference implementation this
+      # project validated first. Deploy/run with:
+      #   databricks bundle deploy --profile medallion
+      host: https://dbc-fbe3df8d-7ffc.cloud.databricks.com
+      # gold_export_root left empty -- export_gold_to_adls no-ops here.
+
+  azure:
+    mode: development
+    workspace:
+      # `medallion-azure` Databricks CLI profile -- real Azure Databricks
+      # (Premium, infra/main.bicep), auth_type = azure-cli in
+      # ~/.databrickscfg (uses your `az login` session, no PAT needed).
+      # Deploy/run with:
+      #   databricks bundle deploy --profile medallion-azure --target azure
+      #   databricks bundle run pharma_lakehouse_job --profile medallion-azure --target azure
+      host: https://adb-7405613897559086.6.azuredatabricks.net
+    variables:
+      # Azure Unity Catalog auto-provisions a default catalog per workspace
+      # instead of one named "workspace" -- this is this workspace's.
+      catalog: pharmalake_dbx
+      gold_export_root: abfss://pharma-gold@stc360legacyws.dfs.core.windows.net
