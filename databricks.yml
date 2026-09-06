@@ -104,11 +104,20 @@ targets:
     default: true
     workspace:
       # `medallion` Databricks CLI profile (~/.databrickscfg) -- AWS Free
-      # Edition workspace, kept as the $0 reference implementation this
-      # project validated first. Deploy/run with:
+      # Edition workspace. This is now the project's primary, cost-free
+      # target: with the `azure` workspace decommissioned (NAT Gateway
+      # charge, see below), everything runs here at $0. Deploy/run with:
       #   databricks bundle deploy --profile medallion
+      #   databricks bundle run pharma_lakehouse_job --profile medallion
       host: https://dbc-fbe3df8d-7ffc.cloud.databricks.com
       # gold_export_root left empty -- export_gold_to_adls no-ops here.
+    variables:
+      # Catalog named to match the (now decommissioned) Azure workspace's
+      # convention, so the project reads consistently regardless of which
+      # workspace it's actually running on. Pre-existing pharma_lakehouse
+      # data under the `workspace` catalog (from earlier runs) is untouched
+      # -- this just points new runs at a dedicated, clearly-named catalog.
+      catalog: pharmalake_dbx
 
   # `azure` target decommissioned 2026-08-29 -- pharmalake-dbx workspace
   # deleted (az databricks workspace delete) to stop a standing NAT Gateway

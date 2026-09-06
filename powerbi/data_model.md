@@ -21,8 +21,10 @@ warehouse anyway.
    `medallion` workspace — do not reuse the one in `~/.databrickscfg`
    directly in a shared/published report; generate a report-scoped token).
 5. Mode: **DirectQuery**.
-6. Catalog: `workspace`, Schema: `pharma_lakehouse`. Import all `dim_*`,
-   `fact_*`, and `gold_*` tables.
+6. Catalog: `pharmalake_dbx`, Schema: `pharma_lakehouse`. Import all `dim_*`,
+   `fact_*`, and `gold_*` tables. (Earlier runs also left data under the
+   `workspace` catalog — `pharmalake_dbx` is the current, actively
+   maintained one; see `databricks.yml`'s `dev` target.)
 
 The warehouse auto-suspends when idle (Serverless Starter Warehouse,
 2X-Small) and cold-starts in a few seconds on the next query — expect a

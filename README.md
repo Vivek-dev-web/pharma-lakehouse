@@ -2,22 +2,25 @@
 
 An end-to-end Azure data engineering project on a synthetic pharma
 supply-chain / clinical-safety domain, built to exercise the full breadth of
-an Azure Data Engineer role. Runs on **real Azure Databricks** (Premium,
-Unity Catalog), with **Azure Data Factory, Synapse serverless SQL, and ADLS
-Gen2** reused from an existing resource group — every claim below has
-actually been deployed and run, not just designed.
+an Azure Data Engineer role. Every claim below has actually been deployed
+and run, not just designed — **including the cost-driven pivots**: this
+project ran on real Azure Databricks (Premium) for a while, hit a real
+recurring cost it hadn't accounted for, and consolidated back onto a $0
+workspace. That history is documented, not hidden — see
+[docs/HLD.md section 7](docs/HLD.md#7-deployment-topology-and-current-state).
 
-- **Databricks** (`pharmalake-dbx`, Azure, Premium — `infra/main.bicep`)
+- **Databricks** (`medallion`, AWS Free Edition, catalog `pharmalake_dbx`)
   runs the full bronze → silver → gold pipeline, data quality checks, and
-  Unity Catalog governance. A second target (`medallion`, AWS Free Edition)
-  is kept as the $0 reference implementation this project validated first.
+  Unity Catalog governance — at **$0**. This is the project's primary,
+  actively maintained target.
 - **Azure Data Factory + Synapse serverless SQL + ADLS Gen2** (all
   pre-existing in `rg-customer360-legacy`) demonstrate real database + public
   API integration, using managed-identity auth only — no passwords or
-  storage keys anywhere in this repo.
-- **Power BI** DirectQueries Databricks SQL; **Synapse serverless SQL** also
-  reads the same gold Delta tables directly via a dedicated export step —
-  both serving paths verified working.
+  storage keys anywhere in this repo. Still fully live.
+- **Power BI** DirectQueries Databricks SQL on the live `medallion`
+  workspace. **Synapse serverless SQL** also reads gold Delta tables
+  directly, but only as a static snapshot from when the (now decommissioned)
+  Azure Databricks workspace last exported them — see the status table below.
 
 See [docs/architecture.md](docs/architecture.md) for the full diagram and
 the platform constraints this build actually ran into (Unity Catalog storage
@@ -42,21 +45,17 @@ you haven't used Databricks before.
 
 ## What's actually live right now
 
-Everything. Every component below has been deployed, run, and verified with
-real data — not just designed:
-
 | Component | Status | Evidence |
 |---|---|---|
-| Azure Databricks workspace (`pharmalake-dbx`) | **Decommissioned 2026-08-29** | Deleted to stop a standing ~Rs 1,500/month NAT Gateway charge -- Azure now auto-provisions one for any new Databricks workspace regardless of VNet config, so it wasn't avoidable in place. See `databricks.yml`'s commented-out `azure` target for how to redeploy if needed again; all data was synthetic/regeneratable. |
-| Databricks bundle, `azure` target | **Ran successfully before decommission** | Full job succeeded repeatedly: generate → Lakeflow pipeline → DQ → governance → gold export, ~5 min end-to-end. Target now commented out in `databricks.yml`. |
-| Gold tables (UC-managed) | **Populated with real data** | 4,000 shipments, 1,200 adverse events, 500 batches — verified via SQL warehouse |
-| Gold export (`pharma_lakehouse_gold` schema) | **11/11 tables exported, readable from Synapse** | Real `SELECT`/`JOIN` across `gold_safety_signal_summary` + `dim_product` via Synapse serverless SQL, 440 rows |
-| Storage RBAC (`infra/rbac.bicep`) | **Applied** | ADF's, the access connector's, **and Synapse workspace's** managed identities all granted Storage Blob Data Contributor |
-| UC storage credential + external location | **Created** | `stc360legacyws_cred` / `pharma_gold`, backed by `pharmalake-uc-access-connector` |
+| Databricks bundle, `dev` target (`medallion`, $0) | **Live, primary target** | Full job succeeds end-to-end against catalog `pharmalake_dbx`: generate → Lakeflow pipeline → DQ → governance → gold export (no-op here) |
+| Gold tables (UC-managed, `pharmalake_dbx.pharma_lakehouse`) | **Populated with real data** | 4,000 shipments, 1,200 adverse events, 500 batches, 25/25 DQ checks passing — verified via SQL warehouse |
+| Power BI serving | **Live** | DirectQuery to `medallion`'s Serverless Starter Warehouse, catalog `pharmalake_dbx` |
+| ADF pipeline (`pl_pharma_orchestrate`) | **Fully succeeds** | Both activities succeed: 500 rows copied from Synapse serverless SQL, records copied from the ClinicalTrials.gov API |
+| Storage RBAC (`infra/rbac.bicep`) | **Applied** | ADF's, the access connector's, and Synapse workspace's managed identities all granted Storage Blob Data Contributor |
 | Budget alert | **Active** | $25/month on `rg-customer360-legacy`, alerts to `vivekt94@gmail.com` at 50/80/100% |
-| ADF pipeline (`pl_pharma_orchestrate`) | **Fully succeeds** | Both activities succeed: 500 rows copied from Synapse serverless SQL, 4 records from the ClinicalTrials.gov API |
-| Synapse serving layer (`sql/synapse_serving_views.sql`) | **Applied, all views resolve** | Raw extracts (`batch_master`, `clinical_registry_raw`) and all 11 gold Delta views queryable with real row counts |
-| Databricks bundle, `dev` target (AWS Free Edition) | **Still live from the first pass** | Kept as the $0 reference implementation |
+| Azure Databricks workspace (`pharmalake-dbx`) | **Decommissioned 2026-08-29** | Deleted to stop a standing ~Rs 1,500/month NAT Gateway charge — Azure now auto-provisions one for any new Databricks workspace regardless of VNet config, so it wasn't avoidable in place. All data was synthetic/regeneratable; see `databricks.yml`'s commented-out `azure` target to redeploy if ever needed again. |
+| Synapse gold-layer views (`sql/synapse_serving_views.sql`) | **Static snapshot, not refreshing** | The 11 gold Delta views still resolve and return correct *historical* data (verified: 440-row `JOIN` across `gold_safety_signal_summary` + `dim_product`), but nothing writes to `pharma-gold` anymore since the `azure` target's decommission. Synapse's raw-layer views (`batch_master`, `clinical_registry_raw`) are unaffected and stay fully live. |
+| CI/CD (Azure DevOps) | **Pipeline created, not yet fully connected** | `pharma-lakehouse-cicd` pipeline exists in the `VivekTiwari_Project1` Azure DevOps project, reading `devops/azure-pipelines.yml` from a mirror of this repo. Needs a service connection + a mirror push of the latest YAML before it can actually run — see [docs/RUNBOOK.md](docs/RUNBOOK.md). |
 
 Six real issues were found and fixed by actually running this end to end
 rather than stopping at "looks right" — see
@@ -76,21 +75,24 @@ shipments, adverse events (de-identified), and inventory snapshots. See
 
 ## Re-running / redeploying
 
-### Databricks (Azure — primary)
-
-```powershell
-databricks bundle deploy --profile medallion-azure --target azure
-databricks bundle run pharma_lakehouse_job --profile medallion-azure --target azure
-```
-`medallion-azure` profile uses `auth_type = azure-cli` in `~/.databrickscfg`
-— no PAT needed, it rides your `az login` session.
-
-### Databricks (AWS Free Edition — $0 reference)
+### Databricks (`medallion`, $0 — primary target)
 
 ```powershell
 databricks bundle deploy --profile medallion
 databricks bundle run pharma_lakehouse_job --profile medallion
 ```
+
+**If you change the `catalog` variable on an existing target** (rather than
+adding a new one), delete the old Lakeflow pipeline object first — it
+carries internal state tied to its original catalog and `databricks bundle
+deploy` updating it in place fails with `PERMISSION_DENIED: Can not move
+tables across arclight catalogs`. See
+[docs/RUNBOOK.md](docs/RUNBOOK.md#trigger-and-verify-databricks-pipeline)
+for the exact recovery steps — hit exactly this moving `dev` from the
+`workspace` catalog to `pharmalake_dbx`.
+
+The `azure` target (real Azure Databricks) is commented out in
+`databricks.yml` — decommissioned, see the status table above.
 
 ### ADF
 
@@ -98,18 +100,22 @@ databricks bundle run pharma_lakehouse_job --profile medallion
 pip install -r requirements.txt
 python adf/deploy_adf_pipeline.py
 ```
-See [adf/README.md](adf/README.md) for details, including the two real
-issues found by testing against the live factory.
+See [adf/README.md](adf/README.md) for details, including the real issues
+found by testing against the live factory.
 
 ### Power BI
 
 Follow [powerbi/data_model.md](powerbi/data_model.md) — DirectQuery to
-`pharmalake-dbx`'s Serverless Starter Warehouse.
+`medallion`'s Serverless Starter Warehouse, catalog `pharmalake_dbx`.
 
 ### CI/CD
 
-[devops/azure-pipelines.yml](devops/azure-pipelines.yml) — import into Azure
-DevOps as a YAML pipeline.
+[devops/azure-pipelines.yml](devops/azure-pipelines.yml) is connected to a
+real Azure DevOps pipeline (`pharma-lakehouse-cicd` in the
+`VivekTiwari_Project1` project, reading from a mirror of this repo at
+`pharma-lakehouse-mirror`) — see [docs/RUNBOOK.md](docs/RUNBOOK.md) for what
+still needs to happen before it can actually run (a service connection and
+a mirror push of the latest pipeline YAML).
 
 ## Local development
 
@@ -124,7 +130,7 @@ python data_gen/generate_pharma_data.py --out-dir ./sample_data --seed 42
 
 | JD responsibility | Where it lives |
 |---|---|
-| Data pipeline development | [transforms/](transforms/) (Lakeflow bronze/silver/gold) — **live on real Azure Databricks** |
+| Data pipeline development | [transforms/](transforms/) (Lakeflow bronze/silver/gold) — **live** on `medallion` ($0), ran successfully on real Azure Databricks before its cost-driven decommission |
 | Data integration (APIs, DBs, external datasets) | [adf/](adf/) — Synapse serverless SQL + ClinicalTrials.gov public API — **both activities succeed live** |
 | Data modeling | [transforms/gold.py](transforms/gold.py) star schema; [docs/data_dictionary.md](docs/data_dictionary.md) |
 | Database management | Reused existing Synapse/storage (see architecture doc for why no new Azure SQL DB) |

@@ -48,8 +48,11 @@ token = dapi...  # Settings -> Developer -> Access tokens, in the workspace UI
 host = https://adb-<workspace-id>.<n>.azuredatabricks.net
 auth_type = azure-cli
 ```
-Requires `az login` already run and the Azure CLI on your PATH. This is what
-this project's `medallion-azure` profile uses.
+Requires `az login` already run and the Azure CLI on your PATH. This
+project's `medallion-azure` profile used this pattern while its Azure
+Databricks workspace was live; that workspace is now decommissioned (see
+[architecture.md](architecture.md)), so the pattern itself is worth knowing
+even though this specific profile is currently pointed at a dead host.
 
 Verify it works:
 ```bash

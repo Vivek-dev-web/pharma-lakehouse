@@ -106,6 +106,17 @@ synthetic and regeneratable, so deletion was the correct call. Redeploying
 is one `az deployment group create` plus uncommenting the `azure` block in
 `databricks.yml` (kept, commented, for exactly this reason).
 
+**Consolidation on `dev`:** after the decommission, `dev`'s catalog was
+changed from the generic `workspace` default to a dedicated `pharmalake_dbx`
+catalog (matching the deleted Azure workspace's naming), so the project
+reads consistently regardless of which underlying workspace it runs on.
+This required deleting and recreating the Lakeflow pipeline object — Unity
+Catalog rejects an in-place catalog change on an existing pipeline
+(`PERMISSION_DENIED: Can not move tables across arclight catalogs`); see
+[RUNBOOK.md](RUNBOOK.md#trigger-and-verify-databricks-pipeline) for the
+mechanics. Verified live: 4,000 shipments, 1,200 adverse events, 500
+batches, 25/25 DQ checks passing under `pharmalake_dbx.pharma_lakehouse`.
+
 **Consequence for Synapse's gold-layer views:** the Delta files under
 `pharma-gold` are a static snapshot from the last `azure`-target run — they
 still resolve and return correct historical data, but nothing refreshes them

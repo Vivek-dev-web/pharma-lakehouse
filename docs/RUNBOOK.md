@@ -10,32 +10,52 @@ something right now" reference.
 
 | Component | Where | Trigger command |
 |---|---|---|
-| Databricks pipeline (Azure) | `pharmalake-dbx` workspace | `databricks bundle run pharma_lakehouse_job --profile medallion-azure --target azure` |
-| Databricks pipeline ($0 reference) | `medallion` (AWS Free Edition) | `databricks bundle run pharma_lakehouse_job --profile medallion` |
+| Databricks pipeline (primary, $0) | `medallion` (AWS Free Edition), catalog `pharmalake_dbx` | `databricks bundle run pharma_lakehouse_job --profile medallion` |
 | ADF pipeline | `adf-c360-legacy` | `az datafactory pipeline create-run -g rg-customer360-legacy --factory-name adf-c360-legacy --name pl_pharma_orchestrate` |
-| Synapse serving layer | `synapse-c360-legacy` | Not a "run" — DDL in `sql/synapse_serving_views.sql` is applied once; the views themselves resolve live on every query |
+| Synapse serving layer | `synapse-c360-legacy` | Not a "run" — DDL in `sql/synapse_serving_views.sql` is applied once; the views themselves resolve live on every query. Serves stale raw/gold data now that the `azure` Databricks target is decommissioned (see below) -- it no longer gets refreshed. |
+
+`azure` target (`pharmalake-dbx` workspace) is **decommissioned** — see
+[HLD.md section 7](HLD.md#7-deployment-topology-and-current-state). `medallion`
+is now the only live Databricks target, and `databricks.yml`'s `dev` target
+points it at the `pharmalake_dbx` catalog (matching the deleted Azure
+workspace's naming) rather than the earlier `workspace` catalog.
 
 ## Trigger and verify: Databricks pipeline
 
 ```bash
-databricks bundle run pharma_lakehouse_job --profile medallion-azure --target azure
+databricks bundle run pharma_lakehouse_job --profile medallion
 ```
 
 Prints a **Run URL** — open it to watch the 5-task job graph live. Expect
-~5 minutes end to end. Task order: `generate_sample_data` → `run_pipeline`
-(Lakeflow bronze/silver/gold) → `run_data_quality_checks` → `apply_governance`
-→ `export_gold_to_adls`.
+~5-20 minutes end to end (serverless cold-start varies). Task order:
+`generate_sample_data` → `run_pipeline` (Lakeflow bronze/silver/gold) →
+`run_data_quality_checks` → `apply_governance` → `export_gold_to_adls`
+(no-ops on this target -- gold export only does anything when
+`gold_export_root` is set, which it isn't here).
 
 **Verify success:**
 ```bash
-databricks api post /api/2.0/sql/statements --profile medallion-azure --json '{
-  "warehouse_id": "5f9d8e808b188ac0",
+databricks api post /api/2.0/sql/statements --profile medallion --json '{
+  "warehouse_id": "601d14523dd66ac2",
   "statement": "SELECT (SELECT COUNT(*) FROM pharmalake_dbx.pharma_lakehouse.dq_results WHERE passed = false) AS failed_checks, (SELECT COUNT(*) FROM pharmalake_dbx.pharma_lakehouse.fact_shipment) AS shipments",
   "wait_timeout": "30s"
 }'
 ```
 `failed_checks` should be `0`. If the warehouse is stopped, this call
 auto-starts it (takes a few seconds) — no separate start step needed.
+
+**Gotcha if you're redeploying after changing the target catalog:** Lakeflow
+pipeline objects carry internal state tied to their original catalog. If
+you change `databricks.yml`'s `catalog` variable for an *existing* target
+(rather than adding a new one), `databricks bundle deploy` updates the same
+pipeline object in place and the next run fails with `PERMISSION_DENIED:
+Can not move tables across arclight catalogs` — Unity Catalog refusing to
+migrate the pipeline's tables between catalogs. Fix: delete the old pipeline
+object first (`databricks api delete /api/2.0/pipelines/<id> --profile
+medallion`, find the id via `databricks api get /api/2.0/pipelines
+--profile medallion`), then redeploy — the bundle creates a fresh pipeline
+with no old-catalog state to migrate. Hit exactly this moving `dev` from
+the `workspace` catalog to `pharmalake_dbx`.
 
 **If a task fails:** open the Run URL, click the failed task, read the
 notebook/pipeline output directly — it's almost always one of the causes in
@@ -83,18 +103,20 @@ explanation for each is in
 
 ```bash
 # Any SQL warehouse left RUNNING?
-databricks warehouses list --profile medallion-azure
 databricks warehouses list --profile medallion
 
 # Stop one if needed
-databricks warehouses stop <id> --profile medallion-azure
+databricks warehouses stop <id> --profile medallion
 ```
 
-Both warehouses have auto-stop configured (5 min on `pharmalake-dbx`, 10 min
-on `medallion`) — a stray run self-corrects. The $25/month budget alert on
-`rg-customer360-legacy` emails `vivekt94@gmail.com` at 50/80/100% regardless;
-check `az consumption budget list -g rg-customer360-legacy` if you want the
-current threshold state without waiting for an email.
+The `medallion` warehouse has auto-stop configured (10 min idle) — a stray
+run self-corrects. (The Azure warehouse this section used to also mention
+no longer exists — `pharmalake-dbx` was decommissioned, see
+[HLD.md section 7](HLD.md#7-deployment-topology-and-current-state).) The
+$25/month budget alert on `rg-customer360-legacy` emails
+`vivekt94@gmail.com` at 50/80/100% regardless; check `az consumption budget
+list -g rg-customer360-legacy` if you want the current threshold state
+without waiting for an email.
 
 Nothing else in this project has an idle cost — see
 [architecture.md § Cost](architecture.md#cost-real-numbers-not-just-estimates)
@@ -104,8 +126,8 @@ for the full breakdown.
 
 ```bash
 # Databricks
-databricks bundle deploy --profile medallion-azure --target azure
-databricks bundle run pharma_lakehouse_job --profile medallion-azure --target azure
+databricks bundle deploy --profile medallion
+databricks bundle run pharma_lakehouse_job --profile medallion
 
 # ADF
 python adf/deploy_adf_pipeline.py
@@ -119,14 +141,16 @@ python adf/deploy_adf_pipeline.py
 
 ## Tearing down
 
-Not done as part of this project (kept provisioned-but-idle, $0 while
-unused — see the cost section above). If you want to fully remove the new
-resources this project added:
+The Databricks workspace piece is **already done** — `pharmalake-dbx` was
+deleted 2026-08-29 to stop its NAT Gateway charge (see
+[HLD.md section 7](HLD.md#7-deployment-topology-and-current-state)). What's
+left is provisioned-but-idle, $0 while unused (see the cost section above).
+If you want to remove the rest of what this project added:
 
 ```bash
-# Databricks workspace + access connector (irreversible -- deletes all
-# pipelines, notebooks, and Unity Catalog objects created here)
+# Databricks workspace (already deleted -- kept here for reference/history)
 az databricks workspace delete -g rg-customer360-legacy -n pharmalake-dbx
+# Access connector (still exists -- was only used for the now-stale gold export)
 az resource delete --ids /subscriptions/<sub-id>/resourceGroups/rg-customer360-legacy/providers/Microsoft.Databricks/accessConnectors/pharmalake-uc-access-connector
 
 # Blob containers (irreversible -- deletes the landed/exported data)

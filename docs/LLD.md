@@ -174,7 +174,10 @@ see [architecture.md § Decision 3](DESIGN.md#decision-3-gold-tables-stay-uc-man
 **Targets:**
 - `dev` (default, `mode: development`): host
   `https://dbc-fbe3df8d-7ffc.cloud.databricks.com` (Databricks Free Edition,
-  AWS). `gold_export_root` left unset.
+  AWS). Overrides `catalog` to `pharmalake_dbx` (a dedicated catalog created
+  to match the deleted Azure workspace's naming — see
+  [HLD.md §7](HLD.md#7-deployment-topology-and-current-state)) rather than
+  using the bundle-level `workspace` default. `gold_export_root` left unset.
 - `azure`: **commented out** as of 2026-08-29 (workspace deleted — see
   [HLD.md §7](HLD.md#7-deployment-topology-and-current-state)). When it
   existed: host `https://adb-7405613897559086.6.azuredatabricks.net`,
