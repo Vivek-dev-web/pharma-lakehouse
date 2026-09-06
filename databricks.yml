@@ -110,18 +110,26 @@ targets:
       host: https://dbc-fbe3df8d-7ffc.cloud.databricks.com
       # gold_export_root left empty -- export_gold_to_adls no-ops here.
 
-  azure:
-    mode: development
-    workspace:
-      # `medallion-azure` Databricks CLI profile -- real Azure Databricks
-      # (Premium, infra/main.bicep), auth_type = azure-cli in
-      # ~/.databrickscfg (uses your `az login` session, no PAT needed).
-      # Deploy/run with:
-      #   databricks bundle deploy --profile medallion-azure --target azure
-      #   databricks bundle run pharma_lakehouse_job --profile medallion-azure --target azure
-      host: https://adb-7405613897559086.6.azuredatabricks.net
-    variables:
-      # Azure Unity Catalog auto-provisions a default catalog per workspace
-      # instead of one named "workspace" -- this is this workspace's.
-      catalog: pharmalake_dbx
-      gold_export_root: abfss://pharma-gold@stc360legacyws.dfs.core.windows.net
+  # `azure` target decommissioned 2026-08-29 -- pharmalake-dbx workspace
+  # deleted (az databricks workspace delete) to stop a standing NAT Gateway
+  # charge (~Rs 1,500/month). That NAT Gateway wasn't something this
+  # project's code provisioned -- infra/main.bicep never set VNet-injection
+  # parameters, so it was never a customer-managed-VNet deployment. Azure
+  # now auto-provisions a NAT Gateway for *any* new Databricks workspace
+  # (default outbound access retirement), VNet-injected or not, so
+  # recreating this workspace under any name gets the same charge back --
+  # there's no in-place fix, only accept the cost or not have the
+  # workspace. Nothing here was unique to the deleted workspace: all
+  # tables were synthetic/regeneratable (schemas confirmed empty of
+  # anything else before deletion), so redeploying against a fresh
+  # workspace is just `az deployment group create -g rg-customer360-legacy
+  # --template-file infra/main.bicep` (new workspace name) + updating the
+  # `host` below, if this target is ever needed again.
+  #
+  # azure:
+  #   mode: development
+  #   workspace:
+  #     host: https://adb-7405613897559086.6.azuredatabricks.net  # dead, workspace deleted
+  #   variables:
+  #     catalog: pharmalake_dbx
+  #     gold_export_root: abfss://pharma-gold@stc360legacyws.dfs.core.windows.net

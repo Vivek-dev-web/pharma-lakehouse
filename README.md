@@ -26,6 +26,9 @@ UC governance, ADF needing a SQL login in addition to storage RBAC) — all
 discovered by running this for real, not from documentation.
 
 **New here?**
+[docs/HLD.md](docs/HLD.md) is the system-level design (components, tech
+stack, current deployment state). [docs/LLD.md](docs/LLD.md) is the
+module-by-module detail (exact schemas, configs, and logic) underneath it.
 [docs/DESIGN.md](docs/DESIGN.md) has the why (problem statement, decisions
 and tradeoffs, cost model).
 [docs/DATA_FLOW.md](docs/DATA_FLOW.md) has step-by-step diagrams of how data
@@ -44,8 +47,8 @@ real data — not just designed:
 
 | Component | Status | Evidence |
 |---|---|---|
-| Azure Databricks workspace (`pharmalake-dbx`) | **Provisioned & running** | `infra/main.bicep` deployed; Unity Catalog auto-enabled |
-| Databricks bundle, `azure` target | **Deployed & run repeatedly** | Full job succeeds: generate → Lakeflow pipeline → DQ → governance → gold export, ~5 min end-to-end |
+| Azure Databricks workspace (`pharmalake-dbx`) | **Decommissioned 2026-08-29** | Deleted to stop a standing ~Rs 1,500/month NAT Gateway charge -- Azure now auto-provisions one for any new Databricks workspace regardless of VNet config, so it wasn't avoidable in place. See `databricks.yml`'s commented-out `azure` target for how to redeploy if needed again; all data was synthetic/regeneratable. |
+| Databricks bundle, `azure` target | **Ran successfully before decommission** | Full job succeeded repeatedly: generate → Lakeflow pipeline → DQ → governance → gold export, ~5 min end-to-end. Target now commented out in `databricks.yml`. |
 | Gold tables (UC-managed) | **Populated with real data** | 4,000 shipments, 1,200 adverse events, 500 batches — verified via SQL warehouse |
 | Gold export (`pharma_lakehouse_gold` schema) | **11/11 tables exported, readable from Synapse** | Real `SELECT`/`JOIN` across `gold_safety_signal_summary` + `dim_product` via Synapse serverless SQL, 440 rows |
 | Storage RBAC (`infra/rbac.bicep`) | **Applied** | ADF's, the access connector's, **and Synapse workspace's** managed identities all granted Storage Blob Data Contributor |
