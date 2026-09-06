@@ -3,16 +3,21 @@
 # Stages:
 #   1. test    -- pytest on pure-Python business logic (no Spark/cloud needed)
 #   2. validate -- `databricks bundle validate` + `az bicep build` (fast, no deploy)
-#   3. deploy_infra -- `az deployment group create` for infra/main.bicep against
-#                      the EXISTING rg-customer360-legacy resource group (adds
-#                      one blob container + one RBAC role assignment -- no new
-#                      Data Factory/Databricks/SQL resources are provisioned).
-#                      Manual approval gate: this is the one stage that touches
-#                      IAM, so it never runs unattended.
+#   3. deploy_infra -- DISABLED, see warning below.
 #   4. deploy_lakehouse -- `databricks bundle deploy` + `bundle run` the job
 #                      against the `medallion` Free Edition workspace
 #   5. deploy_adf -- `python adf/deploy_adf_pipeline.py` against the existing
 #                      `adf-c360-legacy` factory
+#
+# *** deploy_infra is intentionally disabled (condition: false) ***
+# infra/main.bicep still defines the Azure Databricks workspace resource
+# (`pharmalake-dbx`) that was deliberately deleted on 2026-08-29 to stop a
+# standing ~Rs 1,500/month NAT Gateway charge Azure now auto-attaches to any
+# new Databricks workspace. Running this stage as-is would silently
+# recreate that workspace and the charge. Do not re-enable it until
+# infra/main.bicep's `databricksWorkspace` resource block is removed (or you
+# specifically want the workspace back) -- see docs/LLD.md section 11 and
+# docs/HLD.md section 7 for the full context.
 #
 # Set these as pipeline variables / variable group `pharma-lakehouse-dev`:
 #   AZURE_SERVICE_CONNECTION, DATABRICKS_HOST, DATABRICKS_TOKEN (secret),
@@ -20,13 +25,13 @@
 
 trigger:
   branches:
-    include: [main]
+    include: [master] # this repo's default branch is `master`, not `main`
   paths:
     include: [transforms/*, dq/*, governance/*, infra/*, tests/*, databricks.yml]
 
 pr:
   branches:
-    include: [main]
+    include: [master]
 
 pool:
   vmImage: ubuntu-latest
@@ -73,9 +78,9 @@ stages:
               inlineScript: az bicep build --file infra/main.bicep
 
   - stage: deploy_infra
-    displayName: "Deploy Azure infra (container + RBAC)"
+    displayName: "Deploy Azure infra (container + RBAC) -- DISABLED, see header comment"
     dependsOn: validate
-    condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+    condition: false # DO NOT re-enable without first removing databricksWorkspace from infra/main.bicep
     jobs:
       - deployment: deploy_bicep
         environment: pharma-lakehouse-infra-prod-approval # configure a required-approval check on this environment (this stage grants IAM)
@@ -112,7 +117,7 @@ stages:
 
   - stage: deploy_adf
     displayName: "Deploy ADF pipeline"
-    dependsOn: deploy_infra
+    dependsOn: validate # was deploy_infra -- decoupled since that stage is disabled
     condition: succeeded()
     jobs:
       - job: adf_deploy
